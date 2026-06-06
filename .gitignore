@@ -1,0 +1,41 @@
+# Environment & secrets
+.env
+
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# pytest
+.pytest_cache/
+
+# Project runtime artifacts
+.korinagentflow/
+
+# Development documentation (not for distribution)
+RESUME.md
+REVIEW.md
+WORKLOG.md
+EVALUATION_REPORT.md
+MODIFICATION_SUGGESTIONS.md
+
+# Demo outputs
+demo_output/
+rag_summary.txt
+
+# Benchmark outputs
+benchmarks/results.json
+benchmarks/comparison.json
+benchmarks/ablation.json
+
+# OS
+Thumbs.db
+Desktop.ini

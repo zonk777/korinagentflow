@@ -1,0 +1,84 @@
+{
+    "tasks": [
+        {
+            "id": "L1-01",
+            "difficulty": "L1",
+            "task": "计算 2 的 16 次方除以 4 的结果",
+            "tools": ["CalculatorTool"],
+            "golden_keywords": ["16384"],
+            "check": "contains_number"
+        },
+        {
+            "id": "L1-02",
+            "difficulty": "L1",
+            "task": "列出当前目录下所有 .py 文件和 .toml 文件",
+            "tools": ["BashTool"],
+            "golden_keywords": ["pyproject.toml", "main.py"],
+            "check": "contains_all_keywords"
+        },
+        {
+            "id": "L2-03",
+            "difficulty": "L2",
+            "task": "搜索 Python 最新大版本号",
+            "tools": ["WebSearchTool"],
+            "golden_keywords": ["3.14", "3.13"],
+            "check": "contains_any_keyword"
+        },
+        {
+            "id": "L2-04",
+            "difficulty": "L2",
+            "task": "计算 sin(pi/4) 乘以 sqrt(2) 的精确结果",
+            "tools": ["CalculatorTool"],
+            "golden_keywords": ["1.0", "1"],
+            "check": "contains_number_near_1"
+        },
+        {
+            "id": "L3-05",
+            "difficulty": "L3",
+            "task": "搜索 LangGraph 是什么，然后计算 2025 年的 10%（即 202.5）加上 LangGraph 的初始发布年份",
+            "tools": ["WebSearchTool", "CalculatorTool"],
+            "golden_keywords": ["LangGraph", "202"],
+            "check": "contains_all_keywords"
+        },
+        {
+            "id": "L3-06",
+            "difficulty": "L3",
+            "task": "搜索 DeepSeek V3 发布时间，然后计算从发布日到 2026 年 6 月 5 日大约过了多少天",
+            "tools": ["WebSearchTool", "CalculatorTool"],
+            "golden_keywords": ["DeepSeek", "天"],
+            "check": "contains_all_keywords"
+        },
+        {
+            "id": "L4-07",
+            "difficulty": "L4",
+            "task": "调研 PyTorch 和 TensorFlow 的最新版本，然后计算两者最新大版本号之和",
+            "tools": ["WebSearchTool", "CalculatorTool"],
+            "golden_keywords": ["PyTorch", "TensorFlow"],
+            "check": "contains_all_keywords"
+        },
+        {
+            "id": "L4-08",
+            "difficulty": "L4",
+            "task": "先列出当前目录结构，然后创建一个 demo_output 目录，在里面写一个 hello.txt 文件，内容是 'Hello from AgentFlow'，最后验证文件存在",
+            "tools": ["BashTool"],
+            "golden_keywords": ["demo_output", "hello.txt", "Hello from AgentFlow"],
+            "check": "file_created"
+        },
+        {
+            "id": "L4-09",
+            "difficulty": "L4",
+            "task": "研究一下什么是 RAG (Retrieval-Augmented Generation)，用中文写一段 100 字左右的总结，保存到 rag_summary.txt 文件中",
+            "tools": ["WebSearchTool", "BashTool"],
+            "golden_keywords": ["RAG", "rag_summary"],
+            "check": "file_created"
+        },
+        {
+            "id": "L4-10",
+            "difficulty": "L4",
+            "task": "做一个小型技术选型报告：搜索比较 React、Vue、Svelte 三个前端框架的 GitHub Stars，列出最多 Star 的那个，算一下它比第二名多多少 Star",
+            "tools": ["WebSearchTool", "CalculatorTool"],
+            "golden_keywords": ["React", "Vue", "Svelte", "Star"],
+            "check": "contains_all_keywords"
+        }
+    ]
+}

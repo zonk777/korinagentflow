@@ -1,0 +1,14 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.python-version
+.korinagentflow/
+memory_data/
+*.md
+!README.md
+demos/
+tests/
+benchmarks/

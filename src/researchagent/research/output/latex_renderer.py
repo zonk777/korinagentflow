@@ -16,7 +16,7 @@ LATEX_TEMPLATE = r"""\documentclass[11pt,a4paper]{{article}}
 \usepackage{{cite}}
 \geometry{{margin=2.5cm}}
 \title{{{title}}}
-\author{{KorinAgentFlow Research Assistant}}
+\author{{ResearchAgent Research Assistant}}
 \date{{\\today}}
 
 \begin{{document}}

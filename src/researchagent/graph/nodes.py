@@ -144,6 +144,10 @@ def tools_node(state: AgentState) -> dict[str, Any]:
             try:
                 result = tool.invoke(tool_args)
             except Exception as exc:
+                logger.exception(
+                    "Tool '%s' failed: %s. Args: %s",
+                    tool_name, exc, json.dumps(tool_args, ensure_ascii=False, default=str)[:300],
+                )
                 result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
         # 确保结果为字符串
@@ -239,6 +243,7 @@ def planner_node(state: AgentState) -> dict[str, Any]:
         response = _invoke_with_retry(llm,[HumanMessage(content=prompt)])
         plan = _extract_json(str(response.content))
     except Exception:
+        logger.exception("Planner failed to parse response. Task: %s", task[:200])
         plan = {}
 
     todos = plan.get("todos", [{"id": "1", "content": task, "status": "pending"}])
@@ -291,11 +296,12 @@ def reflector_node(state: AgentState) -> dict[str, Any]:
             final_answer = str(content)
             break
 
-    # 简单对话（无工具调用 + 有回复）→ 自动通过
-    if not had_tool_calls and final_answer.strip():
+    # 简单对话或搜索/计算任务 → 有工具调用+有回复即通过
+    # 反思器只做基本检查，不编造文件写入等额外验收标准
+    if final_answer.strip():
         return {
             "passed": True,
-            "verifier_summary": "简单对话，直接通过。",
+            "verifier_summary": "Agent 已给出回答，通过。",
             "attempts": state.get("attempts", 0) + 1,
         }
 
@@ -324,6 +330,7 @@ def reflector_node(state: AgentState) -> dict[str, Any]:
         response = _invoke_with_retry(llm,[HumanMessage(content=prompt)])
         verdict = _extract_json(str(response.content))
     except Exception:
+        logger.exception("Reflector failed to parse response. Task: %s", task[:200])
         verdict = {}
 
     # FIX: JSON 解析失败时默认不通过，宁重试不错过
@@ -415,20 +422,34 @@ def _extract_json(text: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-    # 3) 后备: 大括号深度追踪，找到配对的 }
+    # 3) 后备: 括号深度追踪（排除字符串内括号干扰）
     start = text.find("{")
     if start >= 0:
         depth = 0
+        in_string = False
+        escape = False
         for i in range(start, len(text)):
-            if text[i] == "{":
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
                 depth += 1
-            elif text[i] == "}":
+            elif ch == "}":
                 depth -= 1
                 if depth == 0:
                     try:
                         return json.loads(text[start:i + 1])
                     except json.JSONDecodeError:
-                        break
+                        continue
 
     return {}
 
@@ -436,17 +457,33 @@ def _extract_json(text: str) -> dict:
 def _is_simple_task(task: str) -> bool:
     """判断是否为简单任务 (跳过详细规划)。
 
-    Args:
-        task: 任务描述。
-
-    Returns:
-        True 表示简单任务，不需要拆解。
+    简单任务: 问候、单步计算、列出文件、echo 等。
     """
-    simple_patterns = ["你好", "谢谢", "再见", "hi", "hello", "bye", "早上好", "晚上好"]
-    task_lower = task.strip().lower()
-    if any(p in task_lower for p in simple_patterns) and len(task) < 20:
+    import re
+
+    task_stripped = task.strip()
+    task_lower = task_stripped.lower()
+
+    if len(task_stripped) < 5:
         return True
-    # 其他任务交由 LLM 判断复杂度
+
+    # 问候语
+    greetings = ["你好", "谢谢", "再见", "hi", "hello", "bye", "早上好", "晚上好"]
+    if any(p in task_lower for p in greetings) and len(task_stripped) < 20:
+        return True
+
+    # 简单计算: 整行主要是算术表达式
+    if re.match(r"^(计算|算|帮我算)?[：:]?\s*[\d\s+\-*/%().\s^]+$", task_stripped):
+        return True
+
+    # 列出文件
+    if re.match(r"^(列出|显示|ls|dir|查看)\s*(文件|目录|folder|file)", task_lower):
+        return True
+
+    # echo/print
+    if re.match(r"^(echo|print|输出)\s", task_lower):
+        return True
+
     return False
 
 

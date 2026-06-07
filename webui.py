@@ -1,4 +1,4 @@
-"""ResearchAgent Chat Web UI.
+"""ResearchAgent Web UI。
 
 Usage: uv run python webui.py
 Visit: http://localhost:7860
@@ -6,8 +6,11 @@ Visit: http://localhost:7860
 
 from __future__ import annotations
 
+import html
 import json
+import logging
 import os
+import re
 import sys
 import threading
 from datetime import datetime, timezone
@@ -15,363 +18,361 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-# 必须在 import gradio 之前检测 BGE-M3 缓存并启用离线模式
 _cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / "models--BAAI--bge-m3"
 if (_cache_dir / "snapshots").is_dir():
     os.environ["HF_HUB_OFFLINE"] = "1"
 
 import gradio as gr  # noqa: E402
-
 from researchagent.graph import build_agent_graph  # noqa: E402
 from researchagent.core.state import RuntimeState  # noqa: E402
 
+logger = logging.getLogger(__name__)
 HISTORY_DIR = Path(__file__).parent / ".researchagent" / "chats"
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+_execution_lock = threading.Lock()
 
+# ============================================================
+# 快捷任务模板
+# ============================================================
+QUICK_TASKS = {
+    "文献综述": "用 ArXiv 和 Semantic Scholar 搜索关于 {topic} 的近期论文（3-5篇），用中文总结每篇的核心方法和发现，最后给出领域概览",
+    "趋势分析": "搜索关于 {topic} 的最新论文（5篇），分析发表年份分布、热门方法和关键词趋势",
+    "方法对比": "搜索关于 {topic} 的论文（3-5篇），提取每篇的方法、数据集和指标，整理为对比分析",
+    "研究空白": "搜索关于 {topic} 的近期论文，分析现有方法的局限性和未来可能的研究方向",
+    "选题建议": "基于关于 {topic} 的研究现状，推荐 3 个有价值的研究选题方向",
+    "论文速览": "搜索关于 {topic} 的最新论文（3篇），列出每篇的标题、作者、核心发现和被引数",
+}
 
-# ---- 会话管理 ----
+# ============================================================
+# 会话管理
+# ============================================================
+def _safe_io(fn):
+    def wrapper(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        except Exception as e:
+            logger.warning("%s failed: %s", fn.__name__, e)
+            return None
+    return wrapper
 
-def list_sessions() -> list[str]:
+@_safe_io
+def list_sessions():
     files = sorted(HISTORY_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return [f.stem for f in files]
+    return [f.stem for f in files] or []
 
+@_safe_io
+def load_session(sid):
+    path = HISTORY_DIR / f"{sid}.json"
+    return json.loads(path.read_text(encoding="utf-8")).get("history", []) if path.exists() else []
 
-def load_session(session_id: str) -> list[dict]:
-    """加载会话，返回 Chatbot 消息格式 [{"role": ..., "content": ...}, ...]."""
-    path = HISTORY_DIR / f"{session_id}.json"
-    if not path.exists():
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return data.get("history", [])
+@_safe_io
+def save_session(sid, history):
+    data = {"session_id": sid, "updated": datetime.now(timezone.utc).isoformat(), "history": history}
+    (HISTORY_DIR / f"{sid}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+@_safe_io
+def delete_session(sid):
+    p = HISTORY_DIR / f"{sid}.json"
+    if p.exists():
+        p.unlink()
 
-def delete_session(session_id: str) -> bool:
-    path = HISTORY_DIR / f"{session_id}.json"
-    if path.exists():
-        path.unlink()
-        return True
-    return False
+def clean_answer(text):
+    text = re.sub(r"子任务\s*\d+\s*状态[：:].*?\n", "", text)
+    text = re.sub(r"(?:\[DONE\]|\[完成\]).*?\n", "", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
-
-def clean_response(text: str) -> str:
-    """去除回复中的内部状态信息（如子任务状态、执行计划等）。"""
-    import re
-    # 去掉 "子任务 X 状态：..." 这类行
-    text = re.sub(r"子任务\s*\d+\s*状态[：:]\s*[✅✓].*?\n", "", text)
-    text = re.sub(r"子任务\s*\d+\s*状态[：:]\s*[❌✗].*?\n", "", text)
-    # 去掉空行
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def save_session(session_id: str, history: list[dict]) -> None:
-    path = HISTORY_DIR / f"{session_id}.json"
-    data = {
-        "session_id": session_id,
-        "updated": datetime.now(timezone.utc).isoformat(),
-        "history": history,
-    }
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-# ---- Agent 执行 ----
-
-def run_agent(
-    user_message: str,
-    history: list[dict],
-    max_iterations: int,
-    cancel_flag: list = None,
-    progress=gr.Progress(),
-) -> tuple[list[dict], str]:
-    """运行 Agent，返回 (对话历史, 执行报告HTML)。
-
-    cancel_flag: 可变容器 [bool]，设为 [True] 可中断执行。
-    """
-
-    if cancel_flag is None:
-        cancel_flag = [False]
-
-    if not user_message.strip():
-        return history, ""
-
-    # 初始化
-    progress(0.05, desc="正在初始化...")
+# ============================================================
+# Agent 执行
+# ============================================================
+def execute_task(task, cancel_flag, progress=gr.Progress()):
+    """执行 Agent 任务，返回 (final_answer, report_html, token_summary)"""
+    progress(0.10, desc="正在初始化...")
     from researchagent.core.tracker import TokenTracker
 
     state = RuntimeState(workspace=Path.cwd())
     tracker = TokenTracker()
     object.__setattr__(state, "_token_tracker", tracker)
     graph = build_agent_graph()
-    progress(0.15, desc="模型就绪，执行中...")
+    progress(0.20, desc="模型就绪，开始思考...")
 
-    # 后台线程执行
-    result_container = {"output": None, "error": None}
-    stream_done = threading.Event()
+    result = {"output": [], "error": None}
+    done = threading.Event()
 
-    def _execute():
+    def _run():
         try:
-            init = {
-                "messages": [],
-                "runtime": state,
-                "task": user_message,
-                "iteration_count": 0,
-                "max_iterations": max_iterations,
-                "todos": [],
-                "plan_summary": "",
-                "acceptance_criteria": [],
-                "verification_commands": [],
-                "attempts": 0,
-                "max_attempts": 2,
-                "passed": False,
-                "verifier_summary": "",
-            }
-            steps = []
+            init = {"messages": [], "runtime": state, "task": task,
+                    "iteration_count": 0, "max_iterations": 8,
+                    "todos": [], "plan_summary": "", "acceptance_criteria": [],
+                    "verification_commands": [], "attempts": 0, "max_attempts": 1,
+                    "passed": False, "verifier_summary": ""}
             for _mode, chunk in graph.stream(init, stream_mode=["updates"]):
-                steps.append(chunk)
-            result_container["output"] = steps
+                if cancel_flag[0]:
+                    break
+                result["output"].append(chunk)
         except Exception as e:
-            result_container["error"] = str(e)
+            result["error"] = str(e)
         finally:
-            stream_done.set()
+            done.set()
 
-    thread = threading.Thread(target=_execute, daemon=True)
-    thread.start()
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
 
-    wait_step = 0
-    while not stream_done.is_set():
+    step = 0
+    while not done.is_set():
         if cancel_flag[0]:
-            stream_done.set()  # 停止轮询
+            done.set()
             progress(1.0, desc="已取消")
-            history.append({"role": "user", "content": user_message})
-            history.append({"role": "assistant", "content": "⏹ 任务已取消"})
-            return history, ""
-        wait_step += 1
-        dots = "." * (wait_step % 4 + 1)
-        pct = 0.15 + min(wait_step, 10) * 0.03 + max(0, wait_step - 10) * 0.01
-        pct = min(pct, 0.92)
-        progress(pct, desc=f"执行中 ({(wait_step+1)//2}s){dots}")
-        thread.join(timeout=0.5)
+            return "任务已取消", "", {}
+        step += 1
+        # 基于输出步数显示真实进度
+        output_count = len(result["output"])
+        if output_count > 0:
+            pct = 0.20 + min(output_count * 0.15, 0.72)
+            progress(pct, desc=f"已完成 {output_count} 步 (LLM调用+工具执行)")
+        else:
+            progress(0.20, desc=f"等待 LLM 响应... ({step * 0.5:.0f}s)")
+        done.wait(0.5)
 
-    if result_container["error"]:
-        history.append({"role": "user", "content": user_message})
-        history.append({"role": "assistant", "content": f"Error: {result_container['error']}"})
-        return history, ""
+    if result["error"]:
+        return f"执行出错: {result['error']}", "", {}
 
-    steps_data = result_container["output"] or []
-    progress(0.92, desc="处理结果中...")
+    # ---- 解析 ----
+    steps = result["output"]
+    progress(0.92, desc="分析结果...")
+    tool_rows, reflections, answer = [], [], ""
 
-    # ---- 解析结果 ----
-    tool_rows: list[str] = []
-    reflection_items: list[str] = []
-    final_answer = ""
-    step_count = len(steps_data)
-
-    for chunk in steps_data:
-        for _node_name, node_update in chunk.items():
-            if node_update is None:
+    for chunk in steps:
+        for node_update in chunk.values():
+            if not node_update:
                 continue
-            messages = node_update.get("messages", [])
-            for msg in messages:
+            for msg in node_update.get("messages", []):
                 tcs = getattr(msg, "tool_calls", None) or []
-                content = getattr(msg, "content", "")
-
                 for tc in tcs:
-                    args_str = json.dumps(tc.get("args", {}), ensure_ascii=False)
                     tool_rows.append(
-                        f"<tr><td><b>{tc.get('name')}</b></td>"
-                        f"<td><code>{args_str[:120]}</code></td></tr>"
+                        f"<tr><td><b>{html.escape(tc.get('name',''))}</b></td>"
+                        f"<td><code>{html.escape(json.dumps(tc.get('args',{}), ensure_ascii=False)[:120])}</code></td></tr>"
                     )
-
+                content = getattr(msg, "content", "")
                 if content:
                     text = str(content)
-                    if text.startswith("[反思结果]"):
-                        reflection_items.append(f"<li>{text}</li>")
+                    if text.startswith("[反思"):
+                        reflections.append(f"<li>{html.escape(text)}</li>")
                     elif not tcs:
-                        final_answer = text
+                        answer = text
 
-    # ---- 对话历史 (dict 格式) ----
-    history.append({"role": "user", "content": user_message})
-    history.append({"role": "assistant", "content": clean_response(final_answer) or "(无响应)"})
-
-    # ---- 执行报告 ----
+    # 报告
     report_parts = [
-        "<details><summary><b>📋 执行报告</b> (点击展开)</summary>",
-        "<table>",
-        f"<tr><td>执行步数</td><td>{step_count}</td></tr>",
-        f"<tr><td>工具调用</td><td>{len(tool_rows)}</td></tr>",
-        "</table>",
+        f"<details><summary><b>执行报告</b> ({len(steps)}步)</summary>",
+        f"<table><tr><td>步数</td><td>{len(steps)}</td></tr><tr><td>工具调用</td><td>{len(tool_rows)}</td></tr></table>",
     ]
-
-    # Token 用量
-    tracker = getattr(state, "_token_tracker", None)
-    if tracker is not None and tracker.usages:
+    if tracker.usages:
         s = tracker.summary()
-        report_parts.append(f"<br><b>💰 Token 用量:</b> 总计 {s['total']:,} (输入 {s['total_prompt']:,} / 输出 {s['total_completion']:,}) — {s['total_calls']} 次调用<br>")
-
+        report_parts.append(f"<br><b>Token:</b> {s['total']:,} ({s['total_calls']}次)")
     if tool_rows:
-        report_parts.append("<br><b>🔧 工具调用:</b><table>")
-        report_parts.extend(tool_rows)
-        report_parts.append("</table>")
-
-    if reflection_items:
-        report_parts.append("<br><b>🔍 反思检查:</b><ul>")
-        report_parts.extend(reflection_items)
-        report_parts.append("</ul>")
-
+        report_parts.append("<br><b>工具调用:</b><table>" + "".join(tool_rows) + "</table>")
+    if reflections:
+        report_parts.append("<br><b>反思:</b><ul>" + "".join(reflections) + "</ul>")
     report_parts.append("</details>")
     report = "\n".join(report_parts)
 
+    # Token 摘要
+    token_summary = {}
+    if tracker.usages:
+        s = tracker.summary()
+        token_summary = {"total": s["total"], "calls": s["total_calls"]}
+
     progress(1.0, desc="完成")
-    return history, report
+    return clean_answer(answer) or "(无响应)", report, token_summary
 
 
-# ---- UI ----
+# ============================================================
+# UI 事件处理
+# ============================================================
+def handle_send(user_msg, history, cancel, topic, sid):
+    """普通发送消息——使用已有 session ID，不新建"""
+    if not user_msg.strip():
+        return history, "", cancel, sid, gr.update()
+    if _execution_lock.locked():
+        history.append({"role": "assistant", "content": "上一个任务仍在运行中，请等待完成"})
+        return history, "", cancel, sid, gr.update()
 
+    _execution_lock.acquire()
+    try:
+        cancel[0] = False
+        t = topic.strip() or "artificial intelligence"
+        msg = user_msg.replace("{topic}", t).replace("{TOPIC}", t)
+
+        history.append({"role": "user", "content": msg})
+        answer, report, _ = execute_task(msg, cancel, gr.Progress())
+        history.append({"role": "assistant", "content": answer})
+
+        if not sid:
+            sid = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        save_session(sid, history)
+        return history, report, cancel, sid, gr.update(choices=list_sessions())
+    finally:
+        _execution_lock.release()
+
+
+def handle_quick(label, history, cancel, topic, sid):
+    """快捷按钮——使用已有 session ID"""
+    t = topic.strip() or "artificial intelligence"
+    task = QUICK_TASKS.get(label, QUICK_TASKS["文献综述"]).replace("{topic}", t)
+
+    if _execution_lock.locked():
+        history.append({"role": "assistant", "content": "上一个任务仍在运行中，请等待完成"})
+        return history, "", cancel, sid, gr.update()
+
+    _execution_lock.acquire()
+    try:
+        cancel[0] = False
+        history.append({"role": "user", "content": f"[{label}] {t}"})
+        answer, report, _ = execute_task(task, cancel, gr.Progress())
+        history.append({"role": "assistant", "content": answer})
+
+        if not sid:
+            sid = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        save_session(sid, history)
+        return history, report, cancel, sid, gr.update(choices=list_sessions())
+    finally:
+        _execution_lock.release()
+
+
+def handle_cancel(cancel):
+    cancel[0] = True
+    return cancel
+
+
+def handle_load(sid):
+    if sid:
+        hist = load_session(sid) or []
+        return hist, "", sid, gr.update()
+    return [], "", "", gr.update()
+
+
+def handle_new():
+    return [], "", datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"), gr.update()
+
+
+def handle_delete(sid, confirmed, hist, rep):
+    if not sid or not confirmed:
+        return hist, rep, sid, gr.update(), False
+    delete_session(sid)
+    return [], "", "", gr.update(choices=list_sessions(), value=None), False
+
+
+# ============================================================
+# UI 布局
+# ============================================================
 CSS = """
-.chat-area { min-height: 500px; }
-.report-area { font-size: 13px; margin-top: 8px; }
+.chat-area { min-height: 480px; }
+.report-area { font-size: 13px; margin-top: 4px; }
 footer { display: none !important; }
 """
 
 with gr.Blocks(title="ResearchAgent") as app:
-    gr.Markdown("# 🔬 ResearchAgent\n学术调研 Agent — 论文搜索 + 分析 + 综述生成")
+    gr.Markdown("# ResearchAgent\n### 学术调研 — 论文搜索 · 综述 · 分析")
 
     session_state = gr.State("")
     cancel_state = gr.State([False])
 
     with gr.Row():
-        # ---- 左侧面板 ----
         with gr.Column(scale=1):
-            gr.Markdown("### 💬 会话")
-            session_radio = gr.Radio(
-                label="历史记录",
-                choices=list_sessions(),
-                value=None,
+            gr.Markdown("### 研究主题")
+            topic_input = gr.Textbox(
+                label="输入研究主题，快捷按钮会自动使用",
+                placeholder="例如: Transformer efficiency optimization",
+                lines=2,
             )
+
+            gr.Markdown("### 快捷任务")
+            quick_labels = list(QUICK_TASKS.keys())
+            btn1 = gr.Button(quick_labels[0], size="sm")
+            btn2 = gr.Button(quick_labels[1], size="sm")
+            btn3 = gr.Button(quick_labels[2], size="sm")
+            btn4 = gr.Button(quick_labels[3], size="sm")
+            btn5 = gr.Button(quick_labels[4], size="sm")
+            btn6 = gr.Button(quick_labels[5], size="sm")
+
+            gr.Markdown("---")
+            max_iter = gr.Slider(1, 20, value=10, step=1, label="最大迭代")
+
+            gr.Markdown("---")
+            gr.Markdown("### 会话历史")
+            session_radio = gr.Radio(label="选择会话", choices=list_sessions(), value=None)
             with gr.Row():
-                load_btn = gr.Button("📂 加载", size="sm")
-                new_btn = gr.Button("🆕 新对话", size="sm")
+                load_btn = gr.Button("加载", size="sm")
+                new_btn = gr.Button("新对话", size="sm")
             with gr.Row():
                 confirm_check = gr.Checkbox(label="确认删除", value=False)
-                del_btn = gr.Button("🗑 删除选中", size="sm", variant="stop")
+                del_btn = gr.Button("删除", size="sm", variant="stop")
 
-            gr.Markdown("### ⚙️ 设置")
-            max_iter = gr.Slider(1, 20, value=10, step=1, label="最大迭代次数")
-            gr.Markdown(
-                """
-                ### 🛠 工具
-                - 🔢 计算器
-                - 💻 Bash 命令
-                - 🔍 网络搜索
-                """
-            )
-
-        # ---- 右侧: 对话区 ----
         with gr.Column(scale=3):
-            chatbot = gr.Chatbot(
-                label="对话",
-                elem_classes=["chat-area"],
-                height=500,
-            )
-            report_html = gr.HTML(
-                label="执行详情",
-                elem_classes=["report-area"],
-            )
+            chatbot = gr.Chatbot(label="对话", elem_classes=["chat-area"], height=520)
+            report_html = gr.HTML(label="执行报告", elem_classes=["report-area"])
 
             with gr.Row():
                 msg_input = gr.Textbox(
-                    placeholder="输入任务... 例如: 计算 123 * 456",
+                    placeholder="输入任务...",
                     scale=4,
                     show_label=False,
                 )
                 send_btn = gr.Button("发送", variant="primary", scale=1)
                 cancel_btn = gr.Button("取消", variant="stop", scale=1)
 
-    # ---- 事件处理 ----
+    # ==== 事件绑定 ====
+    inputs_send = [msg_input, chatbot, cancel_state, topic_input, session_state]
+    outputs_send = [chatbot, report_html, cancel_state, session_state, session_radio]
 
-    def _on_send(msg, hist, max_it, sid, cancel):
-        cancel[0] = False  # 重置取消标志
-        new_hist, report = run_agent(msg, hist, max_it, cancel, gr.Progress())
-        if not sid:
-            sid = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        return new_hist, report, sid, cancel
-
-    def _on_new():
-        sid = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        return [], "", sid
-
-    def _on_cancel(cancel):
-        cancel[0] = True
-        return cancel
-
-    def _on_load(sid):
-        if not sid:
-            return [], "", ""
-        history = load_session(sid)
-        return history, "", sid
-
-    def _on_save(history, sid):
-        if history and sid:
-            save_session(sid, history)
-            return gr.Radio(choices=list_sessions())
-        return gr.Radio(choices=list_sessions())
-
-    send_btn.click(
-        fn=_on_send,
-        inputs=[msg_input, chatbot, max_iter, session_state, cancel_state],
-        outputs=[chatbot, report_html, session_state, cancel_state],
-    ).then(lambda: "", None, msg_input).then(
-        _on_save, [chatbot, session_state], session_radio,
+    send_btn.click(handle_send, inputs_send, outputs_send).then(
+        lambda: "", None, msg_input
     )
 
-    msg_input.submit(
-        fn=_on_send,
-        inputs=[msg_input, chatbot, max_iter, session_state, cancel_state],
-        outputs=[chatbot, report_html, session_state, cancel_state],
-    ).then(lambda: "", None, msg_input).then(
-        _on_save, [chatbot, session_state], session_radio,
+    msg_input.submit(handle_send, inputs_send, outputs_send).then(
+        lambda: "", None, msg_input
     )
 
-    cancel_btn.click(
-        fn=_on_cancel,
-        inputs=cancel_state,
-        outputs=cancel_state,
+    # 快捷按钮
+    inputs_quick = [chatbot, cancel_state, topic_input, session_state]
+    outputs_quick = [chatbot, report_html, cancel_state, session_state, session_radio]
+
+    # 每个快捷按钮用闭包捕获 label
+    btn1.click(
+        lambda hist, canc, top, sid: handle_quick(quick_labels[0], hist, canc, top, sid),
+        inputs_quick, outputs_quick
+    )
+    btn2.click(
+        lambda hist, canc, top, sid: handle_quick(quick_labels[1], hist, canc, top, sid),
+        inputs_quick, outputs_quick
+    )
+    btn3.click(
+        lambda hist, canc, top, sid: handle_quick(quick_labels[2], hist, canc, top, sid),
+        inputs_quick, outputs_quick
+    )
+    btn4.click(
+        lambda hist, canc, top, sid: handle_quick(quick_labels[3], hist, canc, top, sid),
+        inputs_quick, outputs_quick
+    )
+    btn5.click(
+        lambda hist, canc, top, sid: handle_quick(quick_labels[4], hist, canc, top, sid),
+        inputs_quick, outputs_quick
+    )
+    btn6.click(
+        lambda hist, canc, top, sid: handle_quick(quick_labels[5], hist, canc, top, sid),
+        inputs_quick, outputs_quick
     )
 
-    def _on_delete(sid, confirmed):
-        if not sid:
-            return [], "", "", gr.Radio(choices=list_sessions()), False
-        if not confirmed:
-            return [], "", sid, gr.Radio(choices=list_sessions()), False
-        delete_session(sid)
-        choices = list_sessions()
-        return [], "", "", gr.Radio(choices=choices, value=None), False
-
-    load_btn.click(_on_load, session_radio, [chatbot, report_html, session_state])
+    cancel_btn.click(handle_cancel, cancel_state, cancel_state)
+    load_btn.click(handle_load, session_radio, [chatbot, report_html, session_state, session_radio])
+    new_btn.click(handle_new, None, [chatbot, report_html, session_state, session_radio])
     del_btn.click(
-        _on_delete,
-        [session_radio, confirm_check],
+        handle_delete,
+        [session_radio, confirm_check, chatbot, report_html],
         [chatbot, report_html, session_state, session_radio, confirm_check],
     )
-    new_btn.click(_on_new, None, [chatbot, report_html, session_state])
 
-    gr.Examples(
-        examples=[
-            ["计算 (123 + 456) * 789"],
-            ["搜索 LangGraph 是什么并用中文总结"],
-            ["列出当前项目的所有 Python 文件"],
-            ["你好"],
-        ],
-        inputs=msg_input,
-    )
 
 if __name__ == "__main__":
     from researchagent.core.logging_config import setup_logging  # noqa: E402
     setup_logging()
-    app.launch(
-        server_name="127.0.0.1",
-        server_port=7860,
-        share=False,
-        theme=gr.themes.Soft(),
-        css=CSS,
-    )
+    app.launch(server_name="127.0.0.1", server_port=7860, share=False, theme=gr.themes.Soft(), css=CSS)

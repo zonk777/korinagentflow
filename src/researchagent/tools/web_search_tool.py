@@ -23,10 +23,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from dotenv import load_dotenv
-
-# 模块级别加载一次，避免每次搜索都 I/O
-load_dotenv()
+# .env 由 create_model() (providers/openai_provider.py) 统一加载
+# 此处直接使用 os.getenv()
 
 
 def web_search(

@@ -18,6 +18,7 @@ wheels/
 .pytest_cache/
 
 # Project runtime artifacts
+.researchagent/
 .korinagentflow/
 
 # Development documentation (not for distribution)
@@ -26,6 +27,9 @@ REVIEW.md
 WORKLOG.md
 EVALUATION_REPORT.md
 MODIFICATION_SUGGESTIONS.md
+LEARNING_GUIDE.md
+WEBUI_EVALUATION.md
+DEMO.md
 
 # Demo outputs
 demo_output/

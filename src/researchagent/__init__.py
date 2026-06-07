@@ -1,4 +1,4 @@
-"""KorinAgentFlow: LLM-powered agent workflow built with LangGraph."""
+"""ResearchAgent: LLM-powered agent workflow built with LangGraph."""
 
 __all__ = ["__version__"]
 

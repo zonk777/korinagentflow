@@ -1,21 +1,22 @@
 # ResearchAgent
 
-从零构建的 LLM Agent 框架，基于 LangGraph 实现**规划-执行-反思**三阶段闭环。
+基于 LangGraph 的学术调研 Agent，提供论文搜索、文献综述、趋势分析和 LaTeX 草稿生成。
 
 ## 架构
 
 ```
-用户输入 → planner → agent ⇄ tools → reflector → {通过→输出, 未通过→重试}
+用户输入 → planner → agent ⇄ tools → reflector → 输出
 ```
 
-- **Planner**: 拆解任务为子步骤 + 验收标准
-- **Agent**: ReAct 循环，调用 LLM 决定使用哪个工具
-- **Tools**: 计算器 (AST 安全求值)、Bash (Shell 执行)、WebSearch (Tavily)
-- **Reflector**: 检查结果，未通过自动重试（最多 3 次）
+- **Planner**: 拆解任务为子步骤
+- **Agent**: ReAct 循环，调用 LLM 选择工具
+- **Tools**: ArXiv、Semantic Scholar、Web Search、Calculator、Bash
+- **Reflector**: 自动检查执行结果
 
 ## 快速开始
 
 ### 环境要求
+
 - Python >= 3.13
 - [uv](https://docs.astral.sh/uv/) 包管理器
 
@@ -33,35 +34,36 @@ uv sync
 cp .env.example .env
 ```
 
-编辑 `.env` 填入 API 信息：
+编辑 `.env` 填入：
 
 ```
-API_KEY=sk-xxxxxxxx
-MODEL=deepseek-v4-pro
+API_KEY=sk-xxxxxxxx          # DeepSeek API Key
+MODEL=deepseek-v4-pro        # 或 deepseek-chat（更快）
 BASE_URL=https://api.deepseek.com
-TAVILY_API_KEY=tvly-xxxxxxxx   # 从 https://tavily.com 获取
+TAVILY_API_KEY=tvly-xxxx     # 从 https://tavily.com 获取
 ```
 
 ### 运行
 
 ```bash
-# 命令行
+# 学术调研
+uv run researchagent research "Transformer efficiency optimization" -p 10
+
+# 通用 Agent
 uv run researchagent run "计算 123 * 456"
-uv run researchagent run "搜索 Python 最新版本并总结"
 
 # Web 界面
-uv run python webui.py          # 访问 http://localhost:7860
+uv run python webui.py        # 访问 http://localhost:7860
 
 # 单独测试工具
 uv run researchagent tool-test -t calculator "sqrt(144)"
-uv run researchagent tool-test -t bash "dir"
-uv run researchagent tool-test -t search "LangGraph"
+uv run researchagent tool-test -t search "Python"
 ```
 
 ### 测试
 
 ```bash
-uv run pytest tests/ -v         # 89 个测试
+uv run pytest tests/ -v       # 89 个测试
 ```
 
 ### Docker
@@ -72,35 +74,43 @@ docker-compose up
 
 ## 工具
 
-| 工具 | 能力 | 安全 |
-|------|------|------|
-| CalculatorTool | +-*/ sqrt sin cos log 等 | AST 白名单求值 |
-| BashTool | Shell 命令执行 | 危险命令拦截 + 工作区隔离 |
-| WebSearchTool | Tavily 联网搜索 | API Key 认证 |
+| 工具 | 能力 |
+|------|------|
+| ArXivSearch | 预印本论文搜索（免费 API） |
+| SemanticScholar | 已发表论文 + 被引数 + 会议信息 |
+| WebSearch | Tavily 网络搜索 |
+| Calculator | AST 白名单安全求值 |
+| Bash | Shell 命令执行（危险命令拦截） |
 
-## Benchmark
+## 分析功能
 
-10 任务 / 4 难度等级 / 100% 通过率
-
-```bash
-uv run python benchmarks/e2e_bench.py      # 端到端
-uv run python benchmarks/compare_langchain.py  # vs LangChain
-uv run python benchmarks/ablation.py          # 消融实验
-```
-
-## 技术栈
-
-Python 3.13 / LangGraph / LanceDB / BGE-M3 / DeepSeek API / Gradio / Docker
+| 功能 | 说明 |
+|------|------|
+| 引用分析 | 总被引、H-index 估算、高被引排行 |
+| 方法对比 | 提取 15 种 ML 方法模式的频率分布 |
+| 趋势分析 | 年份分布 + growing/stable/declining + 关键词 |
+| LaTeX 渲染 | Jinja2 模板生成论文草稿 |
+| BibTeX 管理 | 自动生成 .bib 引用文件 |
+| 研究空白分析 | LLM 分析现有方法局限性 |
 
 ## 项目结构
 
 ```
 src/researchagent/
-├── cli/           # CLI (Typer + Rich)
-├── core/          # 状态、日志、重试、Token追踪、LLM工厂
+├── cli/           # CLI 入口 (Typer)
+├── core/          # 状态、日志、重试、Token 追踪、LLM 工厂
 ├── graph/         # LangGraph 4 节点 pipeline
-├── memory/        # 短期缓冲 + 长期向量库 (LanceDB)
-├── tools/         # Calculator / Bash / WebSearch + 工具注册
+├── memory/        # 短期缓冲 + 长期向量库 (LanceDB + BGE-M3)
+├── tools/         # 计算器 / Bash / Web 搜索
 ├── prompts/       # Agent / Planner / Reflector 提示词
-└── providers/     # OpenAI 兼容 LLM 接口
+├── providers/     # OpenAI 兼容 LLM 接口
+└── research/      # 学术调研引擎
+    ├── tools/     # ArXiv + Semantic Scholar + PaperDB
+    ├── analysis/  # 引用 / 方法对比 / 趋势分析
+    ├── output/    # LaTeX 渲染 + BibTeX + 论文追踪
+    └── prompts/   # 研究空白分析提示词
 ```
+
+## 技术栈
+
+Python 3.13 / LangGraph / LanceDB / BGE-M3 / DeepSeek API / Gradio / Docker

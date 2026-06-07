@@ -1,4 +1,4 @@
-"""KorinAgentFlow CLI —— 基于 Typer 的命令行入口。
+"""ResearchAgent CLI —— 基于 Typer 的命令行入口。
 
 提供 `researchagent` 命令及其子命令。
 
@@ -39,7 +39,7 @@ setup_logging()
 
 app = typer.Typer(
     name="researchagent",
-    help="KorinAgentFlow: LLM-powered agent workflow built with LangGraph.",
+    help="ResearchAgent: LLM-powered agent workflow built with LangGraph.",
     invoke_without_command=True,
 )
 
@@ -75,7 +75,7 @@ def test_command(
     4. 在成功时显示绿色成功标记，失败时显示红色错误信息
     """
     console.print()
-    console.print("[bold cyan]--- KorinAgentFlow LLM Connection Test ---[/bold cyan]")
+    console.print("[bold cyan]--- ResearchAgent LLM Connection Test ---[/bold cyan]")
     console.print()
 
     try:
@@ -303,7 +303,7 @@ def run_command(
     }
 
     console.print()
-    console.print("[bold cyan]--- KorinAgentFlow Agent ---[/bold cyan]")
+    console.print("[bold cyan]--- ResearchAgent Agent ---[/bold cyan]")
     console.print(f"[dim]Task: {task}[/dim]")
     console.print(f"[dim]Max iterations: {max_iterations}[/dim]")
     console.print()
@@ -563,7 +563,7 @@ def research_command(
     )
 
     console.print()
-    console.print("[bold cyan]--- KorinAgentFlow Research Agent ---[/bold cyan]")
+    console.print("[bold cyan]--- ResearchAgent Research Agent ---[/bold cyan]")
     console.print(f"[dim]Topic: {topic}[/dim]")
     console.print(f"[dim]Max papers: {max_papers}[/dim]")
     console.print(f"[dim]Output: {output_path.absolute()}[/dim]")
